@@ -9,7 +9,7 @@ if __name__ == "__main__":
 
     # Load MNIST data and pre-process it
     (x_train, y_train), (_, _) = tf.keras.datasets.mnist.load_data()
-    x_train = x_train.reshape(-1, 784).astype('float32') / 255
+    x_train = x_train.reshape(-1, 12).astype('float32') / 255
 
     # 1. Initial Training: Train on 10 epochs on the 'current' branch.
     print("=== Initial Training on 'current' branch (10 epochs) ===")
