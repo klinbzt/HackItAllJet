@@ -5,6 +5,9 @@ import tensorflow as tf
 from dash.exceptions import PreventUpdate
 import copy
 import numpy as np
+from createPlots import simulate_gradient_descent, generate_loss_surface, plot_3d_surface
+import datetime
+import os
 
 # Visualization helper class
 class FullNNVisualizer:
@@ -173,25 +176,41 @@ class DashFullNNApp:
         self.forward_steps = self.visualizer.forward_steps
         self.backward_steps = self.visualizer.backward_steps
         self.current_step = 0
-        self.mode = None  # 'forward' or 'backward'
+        self.mode = None
         self.is_paused = False
         self.selected_neuron = None
-
-        # For rollback, store backup weights
         self.backup_weights = None
-
+        
+        # Create TensorBoard log directory
+        self.log_dir = os.path.join("logs", "fit", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+        os.makedirs(self.log_dir, exist_ok=True)
+        
+        # TensorBoard callback
+        self.tensorboard_callback = tf.keras.callbacks.TensorBoard(
+            log_dir=self.log_dir,
+            histogram_freq=1,  # Log weight histograms every epoch
+            write_graph=True,
+            write_images=True,
+            update_freq='epoch',
+            profile_batch=0  # Disable profiling for simplicity
+        )
+        
         self.app = dash.Dash(__name__)
-        self.app.title = "NN Propagation Visualizer"
+        self.app.title = "NN Propagation Visualizer with TensorBoard"
         self._build_layout()
         self._register_callbacks()
 
     def _build_layout(self):
         self.app.layout = html.Div([
-            html.H2("Neural Network Propagation Visualizer"),
+            html.H2("Neural Network Propagation Visualizer with TensorBoard"),
             html.Div([
                 html.Button("\u25B6 Forward Propagation", id="forward-btn", n_clicks=0),
                 html.Button("\u21BB Backpropagation", id="backward-btn", n_clicks=0),
                 html.Button("\u23F8 Pause", id="pause-btn", n_clicks=0),
+                # html.Button("\ud83d\udcc9 Show Loss Surface", id="loss-surface-btn", n_clicks=0, 
+                #           style={'marginLeft': '20px'}),
+                html.Button("\ud83d\udcc8 Open TensorBoard", id="tensorboard-btn", n_clicks=0,
+                          style={'marginLeft': '20px'}),
                 dcc.Interval(id='animation-interval', interval=1000, disabled=True),
                 html.Div(id='step-info', style={'marginLeft': '20px', 'fontWeight': 'bold'}),
             ], style={'marginBottom': '20px', 'display': 'flex', 'alignItems': 'center'}),
@@ -209,14 +228,22 @@ class DashFullNNApp:
                     ),
                     html.Button('Train', id='train-btn', n_clicks=0),
                     html.Button('Rollback', id='rollback-btn', n_clicks=0, 
-                            style={'marginLeft': '20px'}),
+                              style={'marginLeft': '20px'}),
                 ], style={'marginBottom': '10px'}),
                 html.Div(id='training-status'),
+                
+                # TensorBoard Display
+                html.Div([
+                    html.Iframe(
+                        id='tensorboard-iframe',
+                        src=f"http://localhost:6006/",
+                        style={'width': '100%', 'height': '600px', 'border': 'none'}
+                    )
+                ], id='tensorboard-container', style={'display': 'none', 'marginTop': '20px'}),
                 
                 # Weight Modification Section
                 html.H4("Weight Modification", style={'marginTop': '20px'}),
                 html.Div([
-                    # A manual entry option (kept for reference)
                     dcc.Input(
                         id='weight-input',
                         type='text',
@@ -234,8 +261,11 @@ class DashFullNNApp:
                 ]),
                 html.Div(id='modification-status', style={'marginTop': '10px'}),
                 
-                # Editable weights table (generated when a node is selected)
-                html.Div(id='editable-weights-table')
+                # Editable weights table
+                html.Div(id='editable-weights-table'),
+                
+                # Loss Surface Plot
+                # dcc.Graph(id='loss-surface-plot', style={'height': '600px', 'marginTop': '20px'})
             ], style={
                 'marginTop': '30px',
                 'padding': '20px',
@@ -446,9 +476,11 @@ class DashFullNNApp:
             return elements, info_content, selected, weights_table
 
         # Training callback using direct model.fit with a custom callback to backup weights.
+        
         @self.app.callback(
             Output('training-status', 'children'),
             Output('nn-cytoscape', 'elements', allow_duplicate=True),
+            Output('tensorboard-container', 'style'),
             Input('train-btn', 'n_clicks'),
             State('epochs-input', 'value'),
             State('nn-cytoscape', 'elements'),
@@ -456,10 +488,11 @@ class DashFullNNApp:
         )
         def train_model(n_clicks, epochs, current_elements):
             if not epochs or epochs < 1:
-                return "Please enter a valid number of epochs", dash.no_update
+                return "Please enter a valid number of epochs", dash.no_update, dash.no_update
+            
             try:
-                save_interval = 1  # Save state every epoch (adjust as needed)
-                # Define a training callback similar to MLWrapper's
+                save_interval = 1
+                
                 class TrainingCallback(tf.keras.callbacks.Callback):
                     def __init__(self, app):
                         self.app = app
@@ -469,22 +502,47 @@ class DashFullNNApp:
                         self.app.current_epoch += 1
                         self.epoch_count += 1
                         if self.epoch_count % save_interval == 0:
-                            # Backup weights for rollback
                             self.app.backup_weights = self.app.model.get_weights()
+                
+                callbacks = [
+                    TrainingCallback(self),
+                    self.tensorboard_callback  # Add TensorBoard callback
+                ]
                 
                 history = self.model.fit(
                     self.x_train, self.y_train,
                     initial_epoch=self.current_epoch,
                     epochs=self.current_epoch + epochs,
-                    callbacks=[TrainingCallback(self)],
+                    callbacks=callbacks,
                     verbose=0
                 )
-                # Update visualization weights after training
+                
                 self.visualizer._extract_weights()
                 elements = self._clear_classes(current_elements)
-                return f"Training completed for {epochs} epochs. Current epoch: {self.current_epoch}", elements
+                
+                # Show TensorBoard after training
+                tensorboard_style = {'display': 'block', 'marginTop': '20px'}
+                return (f"Training completed for {epochs} epochs. Current epoch: {self.current_epoch}", 
+                        elements, 
+                        tensorboard_style)
             except Exception as e:
-                return f"Training failed: {str(e)}", dash.no_update
+                return f"Training failed: {str(e)}", dash.no_update, dash.no_update
+
+        # Callback to toggle TensorBoard display
+        @self.app.callback(
+            Output('tensorboard-container', 'style', allow_duplicate=True),
+            Input('tensorboard-btn', 'n_clicks'),
+            State('tensorboard-container', 'style'),
+            prevent_initial_call=True
+        )
+        def toggle_tensorboard(n_clicks, current_style):
+            if not n_clicks:
+                raise PreventUpdate
+                
+            if current_style.get('display') == 'none':
+                return {'display': 'block', 'marginTop': '20px'}
+            else:
+                return {'display': 'none'}
 
         # Weight modification callback using the manual inputs (if used)
         @self.app.callback(
@@ -574,6 +632,44 @@ class DashFullNNApp:
                 return "Rolled back to the backup weights.", elements
             else:
                 return "No backup available for rollback.", dash.no_update
+            
+        @self.app.callback(
+            Output('loss-surface-plot', 'figure'),
+            Input('loss-surface-btn', 'n_clicks'),
+            prevent_initial_call=True
+        )
+        def update_loss_surface(n_clicks):
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            log_dir = f"logs/loss_surface/{timestamp}"
+            writer = tf.summary.create_file_writer(log_dir)
+
+            # Simulate training + descent path
+            path = simulate_gradient_descent(self.model, self.x_train, self.y_train, epochs=20)
+
+            # Generate loss surface grid
+            w1_range, w2_range, Z = generate_loss_surface(self.model, self.x_train, self.y_train)
+
+            # Write to TensorBoard
+            with writer.as_default():
+                acc = self.model.evaluate(self.x_train, self.y_train, verbose=0)[1]
+                tf.summary.scalar("final_accuracy", acc, step=0)
+
+                tf.summary.histogram("weights/layer_1", self.model.layers[0].get_weights()[0], step=0)
+                tf.summary.histogram("biases/layer_1", self.model.layers[0].get_weights()[1], step=0)
+
+                # Log surface as scalars over grid
+                for i in range(Z.shape[0]):
+                    for j in range(Z.shape[1]):
+                        step = i * Z.shape[1] + j
+                        tf.summary.scalar("loss_surface", Z[i, j], step=step)
+
+                writer.flush()
+
+            # Return figure for frontend
+            fig = plot_3d_surface(self.model, self.x_train, self.y_train, w1_range, w2_range, Z, path)
+            return fig
+
+        
 
     def _clear_classes(self, elements):
         for el in elements:
@@ -581,7 +677,7 @@ class DashFullNNApp:
             if 'selected-node' not in el['classes']:
                 el['classes'] = ''
         return elements
-
+    
     def run(self):
         self.app.run(debug=True)
 
@@ -597,6 +693,7 @@ if __name__ == "__main__":
         tf.keras.layers.Dense(4, activation='relu', name='layer_3'),
         tf.keras.layers.Dense(4, activation='softmax', name='output_layer')
     ])
+    
     model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
     
     # Generate a random dataset: 100 samples, 4 features, 4 classes.
@@ -609,6 +706,17 @@ if __name__ == "__main__":
     app.x_train = x_train
     app.y_train = y_train
     # Backup initial weights for rollback
-    app.backup_weights = model.get_weights()
+    import threading
+    def run_tensorboard():
+        import subprocess
+        subprocess.run(["tensorboard", "--logdir", "logs", "--port", "6006"])
     
+    tensorboard_thread = threading.Thread(target=run_tensorboard, daemon=True)
+    tensorboard_thread.start()
+    
+    # Start Dash app
+    app = DashFullNNApp(model)
+    app.x_train = x_train
+    app.y_train = y_train
+    app.backup_weights = model.get_weights()
     app.run()
