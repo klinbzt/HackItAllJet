@@ -1,12 +1,12 @@
 import dash
-from dash import html, dcc, Output, Input, State, ctx
+from dash import html, dcc, Output, Input, State, ctx, dash_table
 import dash_cytoscape as cyto
 import tensorflow as tf
 from dash.exceptions import PreventUpdate
 import copy
 import numpy as np
-from dash import dash_table
 
+# Visualization helper class
 class FullNNVisualizer:
     def __init__(self, model):
         self.model = model
@@ -21,7 +21,7 @@ class FullNNVisualizer:
     def _extract_weights(self):
         """Extract weights from the model for visualization"""
         self.weights = {}
-        for i, layer in enumerate(self.model.layers):
+        for layer in self.model.layers:
             if hasattr(layer, 'kernel'):
                 weights = layer.get_weights()[0]  # Weights matrix
                 biases = layer.get_weights()[1]   # Biases vector
@@ -58,28 +58,35 @@ class FullNNVisualizer:
                 node_id = f"{layer_id}_{i}"
                 current_layer_neurons.append(node_id)
                 self.elements.append({
-                    'data': {'id': node_id, 'label': f"{i}", 'layer': layer_idx, 
-                            'layer_name': layer_id, 'neuron_idx': i},
+                    'data': {
+                        'id': node_id,
+                        'label': f"{i}",
+                        'layer': layer_idx, 
+                        'layer_name': layer_id,
+                        'neuron_idx': i
+                    },
                     'position': {'x': x, 'y': y_offset + i * spacing_y},
-                    'classes': ''
+                    'classes': ''  # Ensure default classes exist
                 })
 
             for from_node in prev_layer_neurons:
                 for to_node in current_layer_neurons:
                     self.elements.append({
-                        'data': {'source': from_node, 'target': to_node, 
-                                'id': f"{from_node}->{to_node}"},
+                        'data': {
+                            'source': from_node,
+                            'target': to_node,
+                            'id': f"{from_node}->{to_node}"
+                        },
                         'classes': ''
                     })
 
             if prev_layer_neurons:
-                # For forward steps, we'll process neuron-by-neuron in the current layer
+                # For forward steps, process neuron-by-neuron in the current layer
                 self.forward_steps.extend([
                     (prev_layer_neurons, [current_neuron])
                     for current_neuron in current_layer_neurons
                 ])
-                
-                # For backward steps, we'll process neuron-by-neuron in the previous layer
+                # For backward steps, process neuron-by-neuron in the previous layer
                 self.backward_steps.extend([
                     ([prev_neuron], current_layer_neurons)
                     for prev_neuron in prev_layer_neurons
@@ -148,7 +155,6 @@ class FullNNVisualizer:
             return None
             
         # For Dense layers, weights are stored as (input_dim, units)
-        # So each column represents a neuron's weights
         neuron_weights = layer_weights['weights'][:, neuron_idx]
         neuron_bias = layer_weights['biases'][neuron_idx]
         
@@ -157,8 +163,10 @@ class FullNNVisualizer:
             'bias': neuron_bias
         }
 
+# Dash application class
 class DashFullNNApp:
     def __init__(self, model):
+        self.current_epoch = 0
         self.model = model
         self.visualizer = FullNNVisualizer(model)
         self.elements = self.visualizer.get_elements()
@@ -166,9 +174,11 @@ class DashFullNNApp:
         self.backward_steps = self.visualizer.backward_steps
         self.current_step = 0
         self.mode = None  # 'forward' or 'backward'
-        self.animation_interval = None
         self.is_paused = False
         self.selected_neuron = None
+
+        # For rollback, store backup weights
+        self.backup_weights = None
 
         self.app = dash.Dash(__name__)
         self.app.title = "NN Propagation Visualizer"
@@ -185,6 +195,55 @@ class DashFullNNApp:
                 dcc.Interval(id='animation-interval', interval=1000, disabled=True),
                 html.Div(id='step-info', style={'marginLeft': '20px', 'fontWeight': 'bold'}),
             ], style={'marginBottom': '20px', 'display': 'flex', 'alignItems': 'center'}),
+            
+            # Training Controls Section
+            html.Div([
+                html.H3("Training Controls", style={'marginTop': '30px'}),
+                html.Div([
+                    dcc.Input(
+                        id='epochs-input',
+                        type='number',
+                        value=1,
+                        min=1,
+                        style={'width': '60px', 'marginRight': '10px'}
+                    ),
+                    html.Button('Train', id='train-btn', n_clicks=0),
+                    html.Button('Rollback', id='rollback-btn', n_clicks=0, 
+                            style={'marginLeft': '20px'}),
+                ], style={'marginBottom': '10px'}),
+                html.Div(id='training-status'),
+                
+                # Weight Modification Section
+                html.H4("Weight Modification", style={'marginTop': '20px'}),
+                html.Div([
+                    # A manual entry option (kept for reference)
+                    dcc.Input(
+                        id='weight-input',
+                        type='text',
+                        placeholder='e.g., 0.1, -0.2, 0.3',
+                        style={'width': '200px', 'marginRight': '10px'}
+                    ),
+                    dcc.Input(
+                        id='bias-input',
+                        type='number',
+                        step=0.01,
+                        placeholder='Bias',
+                        style={'width': '80px', 'marginRight': '10px'}
+                    ),
+                    html.Button('Modify Weights', id='modify-weights-btn', n_clicks=0),
+                ]),
+                html.Div(id='modification-status', style={'marginTop': '10px'}),
+                
+                # Editable weights table (generated when a node is selected)
+                html.Div(id='editable-weights-table')
+            ], style={
+                'marginTop': '30px',
+                'padding': '20px',
+                'border': '1px solid #ddd',
+                'borderRadius': '5px'
+            }),
+            
+            # Visualization Components
             cyto.Cytoscape(
                 id='nn-cytoscape',
                 elements=self.elements,
@@ -192,25 +251,18 @@ class DashFullNNApp:
                 style={'width': '100%', 'height': '700px'},
                 stylesheet=self.visualizer.get_stylesheet(),
             ),
-            html.Div(id='neuron-info', style={
-                'marginTop': '20px',
-                'padding': '10px',
-                'border': '1px solid #ddd',
-                'borderRadius': '5px',
-                'backgroundColor': '#f9f9f9'
-            }),
+            html.Div(id='neuron-info'),
             dcc.Store(id='selected-neuron-store')
         ])
 
     def _create_weights_table(self, weights_data):
-        """Create a table showing weights for a neuron"""
+        """Create an editable table showing weights for a neuron"""
         if not weights_data:
             return html.P("No weights available for input layer neurons")
         
         weights = weights_data['weights']
         bias = weights_data['bias']
         
-        # Create table data
         table_data = [{
             'Connection': f'Input {i}',
             'Weight': f'{weight:.4f}'
@@ -221,35 +273,28 @@ class DashFullNNApp:
             'Weight': f'{bias:.4f}'
         })
         
-        return html.Div([
-            html.H4("Neuron Weights"),
-            dash_table.DataTable(
-                id='weights-table',
-                columns=[
-                    {'name': 'Connection', 'id': 'Connection'},
-                    {'name': 'Weight', 'id': 'Weight'}
-                ],
-                data=table_data,
-                style_table={'overflowX': 'auto'},
-                style_cell={
-                    'textAlign': 'left',
-                    'padding': '8px'
-                },
-                style_header={
-                    'backgroundColor': 'rgb(230, 230, 230)',
-                    'fontWeight': 'bold'
-                },
-                style_data_conditional=[
-                    {
-                        'if': {'row_index': len(table_data)-1},
-                        'fontWeight': 'bold',
-                        'backgroundColor': 'rgb(240, 240, 240)'
-                    }
-                ]
-            )
-        ])
+        return dash_table.DataTable(
+            id='weights-table',
+            columns=[
+                {'name': 'Connection', 'id': 'Connection', 'editable': False},
+                {'name': 'Weight', 'id': 'Weight', 'editable': True}
+            ],
+            data=table_data,
+            editable=True,
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left', 'padding': '8px'},
+            style_header={'backgroundColor': 'rgb(230, 230, 230)', 'fontWeight': 'bold'},
+            style_data_conditional=[
+                {
+                    'if': {'row_index': len(table_data)-1},
+                    'fontWeight': 'bold',
+                    'backgroundColor': 'rgb(240, 240, 240)'
+                }
+            ]
+        )
 
     def _register_callbacks(self):
+        # Animation control callback
         @self.app.callback(
             Output('animation-interval', 'disabled'),
             Output('animation-interval', 'n_intervals'),
@@ -287,6 +332,7 @@ class DashFullNNApp:
             
             raise PreventUpdate
 
+        # Animation step callback
         @self.app.callback(
             Output('nn-cytoscape', 'elements'),
             Output('step-info', 'children', allow_duplicate=True),
@@ -308,47 +354,34 @@ class DashFullNNApp:
             if self.current_step >= len(steps):
                 return self._clear_classes(current_elements), "Propagation complete!"
 
-            # Make a deep copy of elements to modify
             elements = [copy.deepcopy(el) for el in current_elements]
-
             from_nodes, to_nodes = steps[self.current_step]
 
-            # Reset all classes first (except selected nodes)
             for el in elements:
+                el['classes'] = el.get('classes', '')
                 if 'selected-node' not in el['classes']:
                     el['classes'] = ''
 
-            # Highlight previous layer nodes (green)
             for el in elements:
                 el_id = el['data'].get('id')
                 if el_id in from_nodes:
                     el['classes'] = 'previous-node'
-            
-            # Highlight current receiving node (yellow)
-            for el in elements:
-                el_id = el['data'].get('id')
-                if el_id in to_nodes:
+                elif el_id in to_nodes:
                     el['classes'] = 'receiving-node'
-            
-            # Highlight active edges (orange)
-            for el in elements:
-                if 'source' in el['data']:
-                    if el['data']['source'] in from_nodes and el['data']['target'] in to_nodes:
-                        el['classes'] = 'active-edge'
-            
-            # Create informative message
+                elif 'source' in el['data'] and el['data']['source'] in from_nodes and el['data']['target'] in to_nodes:
+                    el['classes'] = 'active-edge'
+
             if self.mode == 'forward':
-                layer_idx = next(el['data']['layer'] for el in elements 
-                             if el['data'].get('id') == to_nodes[0])
+                layer_idx = next(el['data']['layer'] for el in elements if el['data'].get('id') == to_nodes[0])
                 message = f"Layer {layer_idx}: Neuron {to_nodes[0].split('_')[-1]} receiving inputs"
             else:
-                layer_idx = next(el['data']['layer'] for el in elements 
-                             if el['data'].get('id') == from_nodes[0])
+                layer_idx = next(el['data']['layer'] for el in elements if el['data'].get('id') == from_nodes[0])
                 message = f"Layer {layer_idx}: Neuron {from_nodes[0].split('_')[-1]} sending gradients"
 
             self.current_step += 1
             return elements, message
 
+        # Animation stop callback
         @self.app.callback(
             Output('animation-interval', 'disabled', allow_duplicate=True),
             Input('animation-interval', 'n_intervals'),
@@ -364,58 +397,187 @@ class DashFullNNApp:
                 max_steps = len(self.backward_steps)
             
             if self.current_step >= max_steps:
-                return True  # Disable interval
-            return False  # Keep interval enabled
+                return True
+            return False
 
+        # Neuron selection callback: when a node is clicked, show its weights and create an editable table.
         @self.app.callback(
             Output('nn-cytoscape', 'elements', allow_duplicate=True),
             Output('neuron-info', 'children'),
             Output('selected-neuron-store', 'data'),
+            Output('editable-weights-table', 'children'),
             Input('nn-cytoscape', 'tapNode'),
             State('nn-cytoscape', 'elements'),
             State('selected-neuron-store', 'data'),
             prevent_initial_call=True
         )
         def select_neuron(node_data, current_elements, stored_data):
-            if not node_data or not self.is_paused and not self.current_step == 0:
+            if not node_data or (not self.is_paused and self.current_step != 0):
                 raise PreventUpdate
                 
-            # Make a deep copy of elements to modify
             elements = [copy.deepcopy(el) for el in current_elements]
             
-            # Clear previous selection
             for el in elements:
+                el['classes'] = el.get('classes', '')
                 if 'selected-node' in el['classes']:
                     el['classes'] = el['classes'].replace('selected-node', '').strip()
             
-            # Get the clicked node ID
             node_id = node_data['data']['id']
             
-            # Find and highlight the clicked node
             for el in elements:
                 if el['data']['id'] == node_id:
                     el['classes'] = 'selected-node'
                     break
             
-            # Get neuron info
             layer_name = node_data['data']['layer_name']
             neuron_idx = node_data['data']['neuron_idx']
-            self.selected_neuron = {'layer': layer_name, 'neuron': neuron_idx}
+            selected = {'layer': layer_name, 'neuron': neuron_idx}
             
-            # Get weights for this neuron
             weights_data = self.visualizer.get_weights_for_neuron(layer_name, neuron_idx)
             
-            # Create info display
+            # Create an editable weights table
+            weights_table = self._create_weights_table(weights_data)
+            
             info_content = html.Div([
                 html.H3(f"Neuron Info - Layer: {layer_name}, Neuron: {neuron_idx}"),
-                self._create_weights_table(weights_data)
+                weights_table
             ])
             
-            return elements, info_content, {'layer': layer_name, 'neuron': neuron_idx}
+            return elements, info_content, selected, weights_table
+
+        # Training callback using direct model.fit with a custom callback to backup weights.
+        @self.app.callback(
+            Output('training-status', 'children'),
+            Output('nn-cytoscape', 'elements', allow_duplicate=True),
+            Input('train-btn', 'n_clicks'),
+            State('epochs-input', 'value'),
+            State('nn-cytoscape', 'elements'),
+            prevent_initial_call=True
+        )
+        def train_model(n_clicks, epochs, current_elements):
+            if not epochs or epochs < 1:
+                return "Please enter a valid number of epochs", dash.no_update
+            try:
+                save_interval = 1  # Save state every epoch (adjust as needed)
+                # Define a training callback similar to MLWrapper's
+                class TrainingCallback(tf.keras.callbacks.Callback):
+                    def __init__(self, app):
+                        self.app = app
+                        self.epoch_count = 0
+
+                    def on_epoch_end(self, epoch, logs=None):
+                        self.app.current_epoch += 1
+                        self.epoch_count += 1
+                        if self.epoch_count % save_interval == 0:
+                            # Backup weights for rollback
+                            self.app.backup_weights = self.app.model.get_weights()
+                
+                history = self.model.fit(
+                    self.x_train, self.y_train,
+                    initial_epoch=self.current_epoch,
+                    epochs=self.current_epoch + epochs,
+                    callbacks=[TrainingCallback(self)],
+                    verbose=0
+                )
+                # Update visualization weights after training
+                self.visualizer._extract_weights()
+                elements = self._clear_classes(current_elements)
+                return f"Training completed for {epochs} epochs. Current epoch: {self.current_epoch}", elements
+            except Exception as e:
+                return f"Training failed: {str(e)}", dash.no_update
+
+        # Weight modification callback using the manual inputs (if used)
+        @self.app.callback(
+            Output('weight-modification-status', 'children'),
+            Output('nn-cytoscape', 'elements', allow_duplicate=True),
+            Input('modify-weights-btn', 'n_clicks'),
+            State('selected-neuron-store', 'data'),
+            State('weight-input', 'value'),
+            State('bias-input', 'value'),
+            State('nn-cytoscape', 'elements'),
+            prevent_initial_call=True
+        )
+        def manual_modify_weights(n_clicks, neuron_data, weights_str, bias, current_elements):
+            if not neuron_data:
+                return "Please select a neuron first", dash.no_update
+            if not weights_str or bias is None:
+                return "Please enter both weights and bias values", dash.no_update
+            try:
+                new_weights = [float(w.strip()) for w in weights_str.split(',')]
+                layer_idx = next(
+                    i for i, layer in enumerate(self.model.layers)
+                    if layer.name == neuron_data['layer']
+                )
+                current_weights = self.model.layers[layer_idx].get_weights()
+                current_weights[0][:, neuron_data['neuron']] = new_weights
+                current_weights[1][neuron_data['neuron']] = bias
+                self.model.layers[layer_idx].set_weights(current_weights)
+                self.visualizer._extract_weights()
+                elements = self._clear_classes(current_elements)
+                success_msg = html.Div([
+                    html.P("Weights modified successfully!", style={'color': 'green'}),
+                    html.P(f"Layer: {neuron_data['layer']}, Neuron: {neuron_data['neuron']}"),
+                    html.P(f"New weights: {', '.join(f'{w:.4f}' for w in new_weights)}"),
+                    html.P(f"New bias: {bias:.4f}")
+                ])
+                return success_msg, elements
+            except Exception as e:
+                return html.Div(f"Error: {str(e)}", style={'color': 'red'}), dash.no_update
+
+        # Callback to update weights from the editable table when a cell is edited.
+        @self.app.callback(
+            Output('weight-modification-status', 'children', allow_duplicate=True),
+            Output('nn-cytoscape', 'elements', allow_duplicate=True),
+            Input('weights-table', 'data_timestamp'),
+            State('weights-table', 'data'),
+            State('selected-neuron-store', 'data'),
+            State('nn-cytoscape', 'elements'),
+            prevent_initial_call=True
+        )
+        def update_weight_from_table(ts, table_data, neuron_data, current_elements):
+            if not neuron_data:
+                raise PreventUpdate
+            layer_name = neuron_data['layer']
+            neuron_idx = neuron_data['neuron']
+            # Find the corresponding layer index.
+            layer_idx = next(i for i, layer in enumerate(self.model.layers) if layer.name == layer_name)
+            try:
+                # Assume table_data rows: first len-1 rows for weights, last row for bias.
+                new_weights = [float(row['Weight']) for row in table_data[:-1]]
+                new_bias = float(table_data[-1]['Weight'])
+            except Exception as e:
+                return html.Div(f"Error parsing table data: {str(e)}", style={'color': 'red'}), current_elements
+
+            current_weights = self.model.layers[layer_idx].get_weights()
+            if len(new_weights) != current_weights[0].shape[0]:
+                return html.Div("Dimension mismatch in weight update.", style={'color': 'red'}), current_elements
+            current_weights[0][:, neuron_idx] = new_weights
+            current_weights[1][neuron_idx] = new_bias
+            self.model.layers[layer_idx].set_weights(current_weights)
+            self.visualizer._extract_weights()
+            new_elements = self._clear_classes(current_elements)
+            return html.Div("Weights updated from table.", style={'color': 'green'}), new_elements
+
+        # Rollback callback
+        @self.app.callback(
+            Output('training-status', 'children', allow_duplicate=True),
+            Output('nn-cytoscape', 'elements', allow_duplicate=True),
+            Input('rollback-btn', 'n_clicks'),
+            State('nn-cytoscape', 'elements'),
+            prevent_initial_call=True
+        )
+        def rollback_model(n_clicks, current_elements):
+            if self.backup_weights is not None:
+                self.model.set_weights(self.backup_weights)
+                self.visualizer._extract_weights()
+                elements = self._clear_classes(current_elements)
+                return "Rolled back to the backup weights.", elements
+            else:
+                return "No backup available for rollback.", dash.no_update
 
     def _clear_classes(self, elements):
-        # Reset classes for all elements (except selected nodes)
         for el in elements:
+            el['classes'] = el.get('classes', '')
             if 'selected-node' not in el['classes']:
                 el['classes'] = ''
         return elements
@@ -423,13 +585,30 @@ class DashFullNNApp:
     def run(self):
         self.app.run(debug=True)
 
-# Example usage
+# Main block: build a NN with 4 layers (each with 4 neurons), create random data, and run the app.
 if __name__ == "__main__":
     tf.keras.backend.clear_session()
+    
+    # Build a neural network with 4 layers (each with 4 neurons)
     model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=(3,), name='input_layer'),
-        tf.keras.layers.Dense(4, activation='relu', name='hidden_1'),
-        tf.keras.layers.Dense(2, activation='softmax', name='output_layer')
+        tf.keras.layers.Input(shape=(4,), name='input_layer'),
+        tf.keras.layers.Dense(4, activation='relu', name='layer_1'),
+        tf.keras.layers.Dense(4, activation='relu', name='layer_2'),
+        tf.keras.layers.Dense(4, activation='relu', name='layer_3'),
+        tf.keras.layers.Dense(4, activation='softmax', name='output_layer')
     ])
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    
+    # Generate a random dataset: 100 samples, 4 features, 4 classes.
+    x_train = np.random.rand(100, 4).astype('float32')
+    y_train = np.random.randint(0, 4, size=(100,))
+    
+    # Instantiate the Dash application with the model.
     app = DashFullNNApp(model)
+    # Attach training data to the app instance so callbacks can use them.
+    app.x_train = x_train
+    app.y_train = y_train
+    # Backup initial weights for rollback
+    app.backup_weights = model.get_weights()
+    
     app.run()

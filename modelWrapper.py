@@ -4,25 +4,30 @@ import tensorflow as tf
 from getModelInfo import ModelStateManager
 
 class MLWrapper:
-    def __init__(self, input_shape=(784,), num_classes=10):
-        self.model = self._build_model(input_shape, num_classes)
+    def __init__(self, model=None, input_shape=(4,), num_classes=10):
+        if model is None:
+            self.model = self._build_model(input_shape, num_classes)
+        else:
+            self.model = model
+            self._build_model(input_shape, num_classes)
         self.state_manager = ModelStateManager(self.model)
         self.current_epoch = 0
-        self.backup_epoch = None  # Save the epoch number from which a modification was made
+        self.backup_epoch = None
+
 
     def _build_model(self, input_shape, num_classes):
-        model = tf.keras.Sequential([
-            tf.keras.layers.Input(shape=input_shape),
-            tf.keras.layers.Dense(128, activation='relu'),
-            tf.keras.layers.Dense(64, activation='relu'),
-            tf.keras.layers.Dense(num_classes, activation='softmax')
-        ])
-        model.compile(
+        # self.model = tf.keras.Sequential([
+        #     tf.keras.layers.Input(shape=input_shape),
+        #     tf.keras.layers.Dense(128, activation='relu'),
+        #     tf.keras.layers.Dense(64, activation='relu'),
+        #     tf.keras.layers.Dense(num_classes, activation='softmax')
+        # ])
+        self.model.compile(
             optimizer='adam',
             loss='sparse_categorical_crossentropy',
             metrics=['accuracy']
         )
-        return model
+        return self.model
 
     def train(self, train_data, epochs=10, save_interval=2):
         # A simple training callback that saves state every save_interval epochs.
