@@ -12,7 +12,7 @@ import json
 from chatbot import ChatAdvisor
 import dash_bootstrap_components as dbc
 
-openai_api_key = "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"
+# openai_api_key = "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"
 
 # Visualization helper class
 class FullNNVisualizer:
