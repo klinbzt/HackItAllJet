@@ -1,0 +1,41 @@
+.btn-custom-primary {
+    background: linear-gradient(45deg, #4facfe 0%, #00f2fe 100%);
+    border: none;
+    color: white;
+}
+.btn-custom-success {
+    background: linear-gradient(45deg, #3bb78f 0%, #0bab64 100%);
+    border: none;
+    color: white;
+}
+.btn-custom-warning {
+    background: linear-gradient(45deg, #f6d365 0%, #fda085 100%);
+    border: none;
+    color: white;
+}
+.btn-custom-danger {
+    background: linear-gradient(45deg, #ff758c 0%, #ff7eb3 100%);
+    border: none;
+    color: white;
+}
+.btn-custom-info {
+    background: linear-gradient(45deg, #a18cd1 0%, #fbc2eb 100%);
+    border: none;
+    color: white;
+}
+.btn-custom-secondary {
+    background: linear-gradient(45deg, #868f96 0%, #596164 100%);
+    border: none;
+    color: white;
+}
+.btn-hover-animation:hover {
+    animation: pulse 0.5s infinite alternate;
+}
+@keyframes pulse {
+    0% { transform: scale(1); }
+    100% { transform: scale(1.05); }
+}
+.card {
+    border-radius: 10px; /* Replace with your desired value */
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1); /* Replace with your desired value */
+}
